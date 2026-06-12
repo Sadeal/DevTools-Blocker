@@ -1,6 +1,19 @@
 (() => {
   'use strict';
 
+  const INSTANCE_KEY = '__image_devtools_protection_installed__';
+
+  if (window[INSTANCE_KEY]) return;
+
+  try {
+    Object.defineProperty(window, INSTANCE_KEY, {
+      value: true,
+      configurable: false
+    });
+  } catch (_) {
+    window[INSTANCE_KEY] = true;
+  }
+
   /* ========================================================================
    * CONFIG
    * ========================================================================
@@ -18,7 +31,8 @@
    *
    * 3 - Aggressive restrictions:
    *     level 2 + faster checks, lower thresholds, less waiting,
-   *     blocks Ctrl+S / Cmd+S, Ctrl+P / Cmd+P, page source shortcuts.
+   *     blocks Ctrl+S / Cmd+S, Ctrl+P / Cmd+P, page source shortcuts,
+   *     adds stricter media/touch/download protection and print hiding.
    *
    * 4 - Maximum browser-level restrictions:
    *     level 3 + fullscreen blur on unfocus/visibility loss,
@@ -37,9 +51,14 @@
       imgCss: false,
       mediaContext: false,
       mediaDrag: false,
+      mediaPointerBlock: false,
+      mediaTouchBlock: false,
+      downloadLinkBlock: false,
+      inlineBackgroundBlock: false,
       devtools: false,
       sizeCheck: false,
       keybinds: false,
+      redirectOnDevtoolsShortcut: false,
       globalContext: false,
       debuggerTiming: false,
       debuggerLoop: false,
@@ -54,6 +73,7 @@
       earlyMacCmdShiftBlur: false,
       saveBlock: false,
       printBlock: false,
+      printCssBlock: false,
       redirectUrl: 'https://www.google.com/',
       startupGrace: 0,
       sizeWidthThreshold: 9999,
@@ -71,9 +91,14 @@
       imgCss: true,
       mediaContext: true,
       mediaDrag: true,
+      mediaPointerBlock: false,
+      mediaTouchBlock: false,
+      downloadLinkBlock: false,
+      inlineBackgroundBlock: false,
       devtools: false,
       sizeCheck: false,
       keybinds: false,
+      redirectOnDevtoolsShortcut: false,
       globalContext: false,
       debuggerTiming: false,
       debuggerLoop: false,
@@ -88,6 +113,7 @@
       earlyMacCmdShiftBlur: false,
       saveBlock: false,
       printBlock: false,
+      printCssBlock: false,
       redirectUrl: 'https://www.google.com/',
       startupGrace: 0,
       sizeWidthThreshold: 9999,
@@ -105,9 +131,14 @@
       imgCss: true,
       mediaContext: true,
       mediaDrag: true,
+      mediaPointerBlock: false,
+      mediaTouchBlock: false,
+      downloadLinkBlock: false,
+      inlineBackgroundBlock: false,
       devtools: true,
       sizeCheck: true,
       keybinds: true,
+      redirectOnDevtoolsShortcut: false,
       globalContext: false,
       debuggerTiming: true,
       debuggerLoop: false,
@@ -122,6 +153,7 @@
       earlyMacCmdShiftBlur: false,
       saveBlock: false,
       printBlock: false,
+      printCssBlock: false,
       redirectUrl: 'https://www.google.com/',
       startupGrace: 500,
       sizeWidthThreshold: 180,
@@ -139,13 +171,18 @@
       imgCss: true,
       mediaContext: true,
       mediaDrag: true,
+      mediaPointerBlock: true,
+      mediaTouchBlock: true,
+      downloadLinkBlock: true,
+      inlineBackgroundBlock: true,
       devtools: true,
       sizeCheck: true,
       keybinds: true,
+      redirectOnDevtoolsShortcut: true,
       globalContext: false,
       debuggerTiming: true,
       debuggerLoop: false,
-      consoleBait: false,
+      consoleBait: true,
       eventLoopLag: true,
       selfHealingStyle: true,
       decoys: true,
@@ -156,6 +193,7 @@
       earlyMacCmdShiftBlur: false,
       saveBlock: true,
       printBlock: true,
+      printCssBlock: true,
       redirectUrl: 'https://www.google.com/',
       startupGrace: 150,
       sizeWidthThreshold: 110,
@@ -173,13 +211,18 @@
       imgCss: true,
       mediaContext: true,
       mediaDrag: true,
+      mediaPointerBlock: true,
+      mediaTouchBlock: true,
+      downloadLinkBlock: true,
+      inlineBackgroundBlock: true,
       devtools: true,
       sizeCheck: true,
       keybinds: true,
+      redirectOnDevtoolsShortcut: true,
       globalContext: false,
       debuggerTiming: true,
       debuggerLoop: false,
-      consoleBait: false,
+      consoleBait: true,
       eventLoopLag: true,
       selfHealingStyle: true,
       decoys: true,
@@ -190,6 +233,7 @@
       earlyMacCmdShiftBlur: false,
       saveBlock: true,
       printBlock: true,
+      printCssBlock: true,
       redirectUrl: 'https://www.google.com/',
       startupGrace: 150,
       sizeWidthThreshold: 110,
@@ -208,8 +252,12 @@
   const O = PROFILES[LEVEL];
 
   const IMG_STYLE_ID = 'anti-img-interaction-style';
-  const MEDIA_SELECTOR = 'img,video,picture,source,canvas,svg,image,object,embed';
+  const PRINT_STYLE_ID = 'anti-media-print-style';
+  const MEDIA_SELECTOR = 'img,video,audio,picture,source,canvas,svg,image,object,embed';
+  const MEDIA_ATTR_SELECTOR = 'img,video,audio,canvas,svg,object,embed';
   const IMG_SELECTOR = 'img,picture img,svg image';
+  const INLINE_BACKGROUND_SELECTOR = '[style*="background-image"],[style*="url("]';
+  const MEDIA_LINK_SELECTOR = 'a[href],area[href]';
   const DEVTOOLS_ACTION = 'redirect';
   const IGNORE_CHECKS_WHEN_TAB_HIDDEN = true;
   const CONSOLE_BAIT_INTERVAL = 1500;
@@ -222,6 +270,16 @@
   const FULL_SCREEN_BLUR_HIDE_DELAY = 120;
   const SCREENSHOT_BLUR_HOLD = 1800;
   const EARLY_SCREENSHOT_RELEASE_DELAY = 250;
+  const BACKGROUND_LOOKUP_DEPTH = 5;
+  const DEVTOOLS_RESUME_COOLDOWN = 1200;
+  const MEDIA_URL_RE = /\.(?:apng|avif|bmp|gif|ico|jpe?g|png|svg|webp|mp4|webm|mov|m4v)(?:[?#].*)?$/i;
+  const PRINT_MEDIA_SELECTOR = O.inlineBackgroundBlock ? `${MEDIA_SELECTOR},${INLINE_BACKGROUND_SELECTOR}` : MEDIA_SELECTOR;
+  const IMG_CSS = [
+    `${IMG_SELECTOR}{pointer-events:none!important;-webkit-user-drag:none!important;user-drag:none!important;-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none!important;touch-action:none!important}`,
+    `${MEDIA_SELECTOR}{-webkit-user-drag:none!important;user-drag:none!important;-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none!important}`,
+    O.inlineBackgroundBlock ? `${INLINE_BACKGROUND_SELECTOR}{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none!important}` : ''
+  ].join('');
+  const PRINT_CSS = `@media print{${PRINT_MEDIA_SELECTOR}{display:none!important;visibility:hidden!important;opacity:0!important}html:after{content:"";position:fixed;inset:0;background:#fff!important;z-index:2147483647!important;pointer-events:none!important}}`;
 
   if (LEVEL <= 0) return;
 
@@ -234,6 +292,7 @@
   let eventLoopHits = 0;
   let consoleBaitHits = 0;
   let lastEventLoopTick = performance.now();
+  let devtoolsChecksPausedUntil = startedAt + O.startupGrace;
   let blurOverlay = null;
   let blurShownAt = 0;
   let blurHideTimer = 0;
@@ -245,6 +304,8 @@
 
   const isAfterGracePeriod = () => performance.now() - startedAt >= O.startupGrace;
   const isHidden = () => IGNORE_CHECKS_WHEN_TAB_HIDDEN && document.hidden;
+  const areDevtoolsChecksPaused = () => performance.now() < devtoolsChecksPausedUntil;
+  const canRunDevtoolsChecks = () => isAfterGracePeriod() && !isHidden() && !areDevtoolsChecksPaused();
   const normalizeUrl = (url) => /^https?:\/\//i.test(url) ? url : `https://${url}`;
 
   const onReady = (fn) => {
@@ -255,10 +316,127 @@
     }
   };
 
+  const appendToDocument = (node) => {
+    const parent = document.head || document.documentElement;
+    if (parent) parent.appendChild(node);
+  };
+
   const closest = (target, selector) => {
     if (!target) return null;
     let node = target.nodeType === Node.ELEMENT_NODE ? target : target.parentElement;
     return node && typeof node.closest === 'function' ? node.closest(selector) : null;
+  };
+
+  const collectElements = (root, selector) => {
+    const elements = [];
+
+    if (!root) return elements;
+
+    if (root.nodeType === Node.ELEMENT_NODE && root.matches && root.matches(selector)) {
+      elements.push(root);
+    }
+
+    if (root.querySelectorAll) {
+      root.querySelectorAll(selector).forEach((el) => elements.push(el));
+    }
+
+    return elements;
+  };
+
+  const isLikelyMediaUrl = (href) => {
+    if (!href) return false;
+
+    const value = String(href).trim();
+
+    return (
+      /^data:(?:image|video)\//i.test(value) ||
+      /^blob:/i.test(value) ||
+      MEDIA_URL_RE.test(value)
+    );
+  };
+
+  const hasProtectedBackground = (node) => {
+    if (!O.inlineBackgroundBlock || !node || node.nodeType !== Node.ELEMENT_NODE) return false;
+
+    if (node.matches && node.matches(INLINE_BACKGROUND_SELECTOR)) return true;
+
+    try {
+      const background = window.getComputedStyle(node).backgroundImage;
+      return Boolean(background && background !== 'none' && /url\(/i.test(background));
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const closestProtectedMedia = (target, includeBackground = false) => {
+    if (!target) return null;
+
+    let node = target.nodeType === Node.ELEMENT_NODE ? target : target.parentElement;
+    let depth = 0;
+
+    while (node && node.nodeType === Node.ELEMENT_NODE && depth <= BACKGROUND_LOOKUP_DEPTH) {
+      if (node.matches && node.matches(MEDIA_SELECTOR)) return node;
+      if (includeBackground && hasProtectedBackground(node)) return node;
+
+      node = node.parentElement;
+      depth += 1;
+    }
+
+    return null;
+  };
+
+  const getMediaAnchor = (target) => {
+    const anchor = closest(target, MEDIA_LINK_SELECTOR);
+
+    if (!anchor) return null;
+
+    const href = anchor.getAttribute('href') || '';
+    const containsMedia = Boolean(anchor.querySelector && anchor.querySelector(MEDIA_SELECTOR));
+    const pointsToMedia = isLikelyMediaUrl(href);
+
+    return containsMedia || pointsToMedia || anchor.hasAttribute('download') ? anchor : null;
+  };
+
+  const isProtectedDownloadAnchor = (anchor) => {
+    if (!O.downloadLinkBlock || !anchor) return false;
+
+    const href = anchor.getAttribute('href') || '';
+    const containsMedia = Boolean(anchor.querySelector && anchor.querySelector(MEDIA_SELECTOR));
+    const pointsToMedia = isLikelyMediaUrl(href);
+
+    return (
+      pointsToMedia ||
+      (anchor.hasAttribute('download') && containsMedia)
+    );
+  };
+
+  const selectionContainsMedia = () => {
+    if (!window.getSelection) return false;
+
+    const selection = window.getSelection();
+
+    if (!selection || selection.isCollapsed) return false;
+
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      const range = selection.getRangeAt(index);
+      const root = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+        ? range.commonAncestorContainer
+        : range.commonAncestorContainer.parentElement;
+
+      if (!root) continue;
+
+      const candidates = collectElements(root, MEDIA_SELECTOR);
+
+      for (const candidate of candidates) {
+        try {
+          if (typeof range.intersectsNode === 'function' && range.intersectsNode(candidate)) {
+            return true;
+          }
+        } catch (_) {}
+      }
+    }
+
+    return false;
   };
 
   const key = (event) => String(event.key || '').toLowerCase();
@@ -322,62 +500,239 @@
     handled = false;
   };
 
-  const injectImgCss = () => {
-    if (!O.imgCss || document.getElementById(IMG_STYLE_ID)) return;
+  const resetDevtoolsHits = () => {
+    sizeHits = 0;
+    debuggerHits = 0;
+    eventLoopHits = 0;
+    consoleBaitHits = 0;
+    lastEventLoopTick = performance.now();
+  };
 
-    const style = document.createElement('style');
-    style.id = IMG_STYLE_ID;
-    style.textContent = `${IMG_SELECTOR}{pointer-events:none!important;-webkit-user-drag:none!important;user-drag:none!important;-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none!important;touch-action:none!important}`;
-    document.head.appendChild(style);
+  const pauseDevtoolsChecks = (duration = DEVTOOLS_RESUME_COOLDOWN) => {
+    if (!O.devtools) return;
+
+    devtoolsChecksPausedUntil = Math.max(devtoolsChecksPausedUntil, performance.now() + duration);
+    resetDevtoolsHits();
+  };
+
+  const skipDevtoolsCheck = () => {
+    if (canRunDevtoolsChecks()) return false;
+
+    resetDevtoolsHits();
+    return true;
+  };
+
+  const installDevtoolsLifecycleGuard = () => {
+    if (!O.devtools) return;
+
+    window.addEventListener('blur', () => pauseDevtoolsChecks(), true);
+    window.addEventListener('focus', () => pauseDevtoolsChecks(), true);
+    window.addEventListener('pageshow', () => pauseDevtoolsChecks(), true);
+    window.addEventListener('pagehide', () => pauseDevtoolsChecks(), true);
+    document.addEventListener('freeze', () => pauseDevtoolsChecks(), true);
+    document.addEventListener('resume', () => pauseDevtoolsChecks(), true);
+
+    document.addEventListener('visibilitychange', () => {
+      pauseDevtoolsChecks();
+    }, true);
+  };
+
+  const injectImgCss = () => {
+    if (!O.imgCss) return;
+
+    let style = document.getElementById(IMG_STYLE_ID);
+
+    if (!style) {
+      style = document.createElement('style');
+      style.id = IMG_STYLE_ID;
+      appendToDocument(style);
+    }
+
+    if (style.disabled) style.disabled = false;
+    if (style.textContent !== IMG_CSS) style.textContent = IMG_CSS;
+  };
+
+  const injectPrintCss = () => {
+    if (!O.printBlock || !O.printCssBlock) return;
+
+    let style = document.getElementById(PRINT_STYLE_ID);
+
+    if (!style) {
+      style = document.createElement('style');
+      style.id = PRINT_STYLE_ID;
+      appendToDocument(style);
+    }
+
+    if (style.disabled) style.disabled = false;
+    if (style.textContent !== PRINT_CSS) style.textContent = PRINT_CSS;
   };
 
   const protectMediaAttrs = (root = document) => {
     if (!O.mediaDrag) return;
 
-    root.querySelectorAll('img,video,canvas,svg,object,embed').forEach((el) => {
+    collectElements(root, MEDIA_ATTR_SELECTOR).forEach((el) => {
       try {
-        el.setAttribute('draggable', 'false');
-        el.draggable = false;
+        if (el.getAttribute('draggable') !== 'false') el.setAttribute('draggable', 'false');
+        if (el.draggable !== false) el.draggable = false;
+      } catch (_) {}
+
+      if (/^(video|audio)$/i.test(el.tagName)) {
+        try {
+          if (el.controlsList && typeof el.controlsList.add === 'function') {
+            ['nodownload', 'noremoteplayback', 'noplaybackrate'].forEach((token) => el.controlsList.add(token));
+          } else if (!/\bnodownload\b/i.test(el.getAttribute('controlslist') || '')) {
+            el.setAttribute('controlsList', 'nodownload noremoteplayback noplaybackrate');
+          }
+        } catch (_) {
+          try {
+            el.setAttribute('controlsList', 'nodownload noremoteplayback noplaybackrate');
+          } catch (__) {}
+        }
+
+        try {
+          el.disableRemotePlayback = true;
+          el.setAttribute('disableremoteplayback', '');
+        } catch (_) {}
+      }
+
+      if (/^video$/i.test(el.tagName)) {
+        try {
+          el.disablePictureInPicture = true;
+          el.setAttribute('disablepictureinpicture', '');
+        } catch (_) {}
+      }
+    });
+  };
+
+  const protectDownloadLinks = (root = document) => {
+    if (!O.downloadLinkBlock) return;
+
+    collectElements(root, MEDIA_LINK_SELECTOR).forEach((anchor) => {
+      if (!isProtectedDownloadAnchor(anchor)) return;
+
+      try {
+        if (anchor.hasAttribute('download')) anchor.removeAttribute('download');
+      } catch (_) {}
+
+      try {
+        const rel = new Set(String(anchor.getAttribute('rel') || '').split(/\s+/).filter(Boolean));
+        rel.add('noopener');
+        rel.add('noreferrer');
+        anchor.setAttribute('rel', Array.from(rel).join(' '));
       } catch (_) {}
     });
+  };
+
+  const hasProtectedEventTarget = (event, includeBackground = false) => {
+    if (closestProtectedMedia(event.target, includeBackground)) return true;
+
+    const anchor = getMediaAnchor(event.target);
+    return Boolean(anchor && isProtectedDownloadAnchor(anchor));
   };
 
   const installMediaBlockers = () => {
     if (O.mediaContext) {
       document.addEventListener('contextmenu', (event) => {
-        if (closest(event.target, MEDIA_SELECTOR)) return stop(event);
-      }, true);
+        if (closestProtectedMedia(event.target, O.inlineBackgroundBlock) || getMediaAnchor(event.target)) {
+          return stop(event);
+        }
+      }, { capture: true, passive: false });
     }
 
     if (O.mediaDrag) {
       ['dragstart', 'drag', 'selectstart', 'copy', 'cut'].forEach((name) => {
         document.addEventListener(name, (event) => {
-          if (closest(event.target, MEDIA_SELECTOR)) return stop(event);
-        }, true);
+          if (hasProtectedEventTarget(event, O.inlineBackgroundBlock)) return stop(event);
+          if ((name === 'copy' || name === 'cut') && selectionContainsMedia()) return stop(event);
+        }, { capture: true, passive: false });
+      });
+    }
+
+    if (O.mediaPointerBlock) {
+      ['mousedown', 'mouseup', 'auxclick'].forEach((name) => {
+        document.addEventListener(name, (event) => {
+          if (event.button === 0 && name !== 'auxclick') return undefined;
+          if (hasProtectedEventTarget(event, O.inlineBackgroundBlock) || getMediaAnchor(event.target)) {
+            return stop(event);
+          }
+          return undefined;
+        }, { capture: true, passive: false });
+      });
+    }
+
+    if (O.mediaTouchBlock) {
+      ['touchstart', 'touchmove', 'gesturestart'].forEach((name) => {
+        document.addEventListener(name, (event) => {
+          if (closestProtectedMedia(event.target, O.inlineBackgroundBlock)) return stop(event);
+        }, { capture: true, passive: false });
       });
     }
   };
 
+  const installDownloadLinkBlockers = () => {
+    if (!O.downloadLinkBlock) return;
+
+    ['click', 'auxclick'].forEach((name) => {
+      document.addEventListener(name, (event) => {
+        const anchor = closest(event.target, MEDIA_LINK_SELECTOR);
+
+        if (isProtectedDownloadAnchor(anchor)) return stop(event);
+      }, { capture: true, passive: false });
+    });
+  };
+
   const installMutationObserver = () => {
-    if (!O.mediaDrag && !O.selfHealingStyle) return;
+    if (!O.mediaDrag && !O.selfHealingStyle && !O.downloadLinkBlock && !O.printCssBlock) return;
 
     new MutationObserver((mutations) => {
-      if (O.selfHealingStyle && O.imgCss && !document.getElementById(IMG_STYLE_ID)) {
+      if (O.selfHealingStyle && O.imgCss) {
         injectImgCss();
       }
 
-      if (!O.mediaDrag) return;
+      if (O.printBlock && O.printCssBlock) {
+        injectPrintCss();
+      }
+
+      if (!O.mediaDrag && !O.downloadLinkBlock) return;
 
       for (const mutation of mutations) {
+        if (mutation.type === 'attributes') {
+          const target = mutation.target;
+
+          if (target && target.nodeType === Node.ELEMENT_NODE) {
+            if (O.mediaDrag && target.matches && target.matches(MEDIA_ATTR_SELECTOR)) {
+              protectMediaAttrs(target);
+            }
+
+            if (O.downloadLinkBlock && target.matches && target.matches(MEDIA_LINK_SELECTOR)) {
+              protectDownloadLinks(target);
+            }
+          }
+        }
+
         for (const node of mutation.addedNodes) {
           if (node.nodeType !== Node.ELEMENT_NODE) continue;
-          if (node.matches && node.matches(MEDIA_SELECTOR)) protectMediaAttrs(node.parentElement || document);
-          else if (node.querySelectorAll) protectMediaAttrs(node);
+          if (O.mediaDrag) protectMediaAttrs(node);
+          if (O.downloadLinkBlock) protectDownloadLinks(node);
         }
       }
     }).observe(document.documentElement, {
       childList: true,
-      subtree: true
+      subtree: true,
+      attributes: true,
+      characterData: true,
+      attributeFilter: [
+        'class',
+        'controlslist',
+        'disablepictureinpicture',
+        'download',
+        'draggable',
+        'href',
+        'rel',
+        'src',
+        'srcset',
+        'style'
+      ]
     });
   };
 
@@ -448,23 +803,44 @@
     const c = code(event);
     const { ctrl, shift, meta, alt, ctrlOrMeta } = getModifiers(event);
 
-    if (k === 'f12' || c === 'f12') return true;
+    return (
+      k === 'f12' ||
+      c === 'f12' ||
+      (O.saveBlock && ctrlOrMeta && !shift && !alt && (k === 's' || c === 'keys')) ||
+      (O.printBlock && ctrlOrMeta && !shift && !alt && (k === 'p' || c === 'keyp')) ||
+      (ctrlOrMeta && !shift && !alt && (k === 'u' || c === 'keyu')) ||
+      (ctrl && shift && ['i', 'j', 'c', 'k', 'e'].includes(k)) ||
+      (ctrl && shift && ['keyi', 'keyj', 'keyc', 'keyk', 'keye'].includes(c)) ||
+      (meta && alt && ['i', 'j', 'c', 'u'].includes(k)) ||
+      (meta && alt && ['keyi', 'keyj', 'keyc', 'keyu'].includes(c))
+    );
+  };
 
-    if (O.saveBlock && ctrlOrMeta && !shift && !alt && (k === 's' || c === 'keys')) {
-      return true;
+  const isDevtoolsAccessShortcut = (event) => {
+    const k = key(event);
+    const c = code(event);
+    const { ctrl, shift, meta, alt, ctrlOrMeta } = getModifiers(event);
+
+    return (
+      k === 'f12' ||
+      c === 'f12' ||
+      (ctrlOrMeta && !shift && !alt && (k === 'u' || c === 'keyu')) ||
+      (ctrl && shift && ['i', 'j', 'c', 'k', 'e'].includes(k)) ||
+      (ctrl && shift && ['keyi', 'keyj', 'keyc', 'keyk', 'keye'].includes(c)) ||
+      (meta && alt && ['i', 'j', 'c', 'u'].includes(k)) ||
+      (meta && alt && ['keyi', 'keyj', 'keyc', 'keyu'].includes(c))
+    );
+  };
+
+  const stopBlockedShortcut = (event) => {
+    if (O.redirectOnDevtoolsShortcut && isDevtoolsAccessShortcut(event)) {
+      detected('devtools-shortcut', {
+        key: event.key || '',
+        code: event.code || ''
+      });
     }
 
-    if (O.printBlock && ctrlOrMeta && !shift && !alt && (k === 'p' || c === 'keyp')) {
-      return true;
-    }
-
-    if (ctrlOrMeta && !shift && !alt && (k === 'u' || c === 'keyu')) return true;
-    if (ctrl && shift && ['i', 'j', 'c', 'k', 'e'].includes(k)) return true;
-    if (ctrl && shift && ['keyi', 'keyj', 'keyc', 'keyk', 'keye'].includes(c)) return true;
-    if (meta && alt && ['i', 'j', 'c', 'u'].includes(k)) return true;
-    if (meta && alt && ['keyi', 'keyj', 'keyc', 'keyu'].includes(c)) return true;
-
-    return false;
+    return stop(event);
   };
 
   const isEarlyScreenshotModifierCombo = (event) => {
@@ -574,7 +950,7 @@
     if (!O.devtools || !O.keybinds) return;
 
     document.addEventListener('keydown', (event) => {
-      if (isBlockedShortcut(event)) return stop(event);
+      if (isBlockedShortcut(event)) return stopBlockedShortcut(event);
     }, true);
   };
 
@@ -698,7 +1074,7 @@
       }
 
       if (isBlockedShortcut(event)) {
-        return stop(event);
+        return stopBlockedShortcut(event);
       }
     } else {
       if (O.screenshotProtection && isScreenshotShortcut(event)) {
@@ -733,8 +1109,38 @@
     }, true);
   };
 
+  const installPrintProtection = () => {
+    if (!O.printBlock) return;
+
+    injectPrintCss();
+
+    const originalPrint = typeof window.print === 'function' ? window.print.bind(window) : null;
+    const guardedPrint = () => {
+      injectPrintCss();
+
+      if (O.blurOnFocusLoss) {
+        hardShowPrivacyBlur();
+      }
+
+      return false;
+    };
+
+    try {
+      Object.defineProperty(window, 'print', {
+        value: guardedPrint,
+        configurable: true
+      });
+    } catch (_) {
+      try {
+        window.print = guardedPrint;
+      } catch (__) {
+        if (originalPrint) window.addEventListener('beforeprint', injectPrintCss, true);
+      }
+    }
+  };
+
   const checkSize = () => {
-    if (!isAfterGracePeriod() || isHidden()) return;
+    if (skipDevtoolsCheck()) return;
 
     const widthGap = Math.abs(window.outerWidth - window.innerWidth);
     const heightGap = Math.abs(window.outerHeight - window.innerHeight);
@@ -765,11 +1171,7 @@
     lastEventLoopTick = performance.now();
 
     setInterval(() => {
-      if (!isAfterGracePeriod() || isHidden()) {
-        lastEventLoopTick = performance.now();
-        eventLoopHits = 0;
-        return;
-      }
+      if (skipDevtoolsCheck()) return;
 
       const now = performance.now();
       const expected = lastEventLoopTick + O.eventLoopInterval;
@@ -798,7 +1200,7 @@
     });
 
     setInterval(() => {
-      if (!isAfterGracePeriod() || isHidden()) return;
+      if (skipDevtoolsCheck()) return;
       console.log(bait);
       console.clear();
     }, CONSOLE_BAIT_INTERVAL);
@@ -832,7 +1234,7 @@
   };
 
   const runDebuggerCheck = () => {
-    if (!isAfterGracePeriod() || isHidden()) return;
+    if (skipDevtoolsCheck()) return;
 
     const elapsed = tailDebuggerProbe();
     const suspicious = elapsed > O.debuggerThreshold;
@@ -863,8 +1265,10 @@
     protectMediaAttrs();
     installMediaBlockers();
     installMutationObserver();
+    installDevtoolsLifecycleGuard();
     installPrivacyBlur();
     installScreenshotAndSaveProtection();
+    installPrintProtection();
     installKeybinds();
     installGlobalContextMenu();
     installSizeCheck();
