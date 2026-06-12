@@ -57,6 +57,8 @@
       inlineBackgroundBlock: false,
       devtools: false,
       sizeCheck: false,
+      instantSizeCheck: false,
+      activityBurstCheck: false,
       keybinds: false,
       redirectOnDevtoolsShortcut: false,
       globalContext: false,
@@ -80,6 +82,8 @@
       sizeHeightThreshold: 9999,
       sizeInterval: 1000,
       sizeHits: 9999,
+      activityBurstDuration: 0,
+      activityBurstInterval: 1000,
       debuggerInterval: 1000,
       debuggerThreshold: 9999,
       debuggerHits: 9999,
@@ -97,6 +101,8 @@
       inlineBackgroundBlock: false,
       devtools: false,
       sizeCheck: false,
+      instantSizeCheck: false,
+      activityBurstCheck: false,
       keybinds: false,
       redirectOnDevtoolsShortcut: false,
       globalContext: false,
@@ -120,6 +126,8 @@
       sizeHeightThreshold: 9999,
       sizeInterval: 1000,
       sizeHits: 9999,
+      activityBurstDuration: 0,
+      activityBurstInterval: 1000,
       debuggerInterval: 1000,
       debuggerThreshold: 9999,
       debuggerHits: 9999,
@@ -137,6 +145,8 @@
       inlineBackgroundBlock: false,
       devtools: true,
       sizeCheck: true,
+      instantSizeCheck: false,
+      activityBurstCheck: false,
       keybinds: true,
       redirectOnDevtoolsShortcut: false,
       globalContext: false,
@@ -160,6 +170,8 @@
       sizeHeightThreshold: 240,
       sizeInterval: 600,
       sizeHits: 2,
+      activityBurstDuration: 0,
+      activityBurstInterval: 1000,
       debuggerInterval: 900,
       debuggerThreshold: 120,
       debuggerHits: 1,
@@ -177,6 +189,8 @@
       inlineBackgroundBlock: true,
       devtools: true,
       sizeCheck: true,
+      instantSizeCheck: true,
+      activityBurstCheck: true,
       keybinds: true,
       redirectOnDevtoolsShortcut: true,
       globalContext: false,
@@ -198,12 +212,14 @@
       startupGrace: 150,
       sizeWidthThreshold: 110,
       sizeHeightThreshold: 150,
-      sizeInterval: 220,
+      sizeInterval: 160,
       sizeHits: 1,
-      debuggerInterval: 350,
+      activityBurstDuration: 1800,
+      activityBurstInterval: 90,
+      debuggerInterval: 240,
       debuggerThreshold: 80,
       debuggerHits: 1,
-      eventLoopInterval: 350,
+      eventLoopInterval: 240,
       eventLoopThreshold: 550,
       eventLoopHits: 1
     },
@@ -217,6 +233,8 @@
       inlineBackgroundBlock: true,
       devtools: true,
       sizeCheck: true,
+      instantSizeCheck: true,
+      activityBurstCheck: true,
       keybinds: true,
       redirectOnDevtoolsShortcut: true,
       globalContext: false,
@@ -238,13 +256,15 @@
       startupGrace: 150,
       sizeWidthThreshold: 110,
       sizeHeightThreshold: 150,
-      sizeInterval: 220,
+      sizeInterval: 140,
       sizeHits: 1,
-      debuggerInterval: 350,
+      activityBurstDuration: 2200,
+      activityBurstInterval: 75,
+      debuggerInterval: 220,
       debuggerThreshold: 80,
       debuggerHits: 1,
-      eventLoopInterval: 350,
-      eventLoopThreshold: 550,
+      eventLoopInterval: 220,
+      eventLoopThreshold: 500,
       eventLoopHits: 1
     }
   ];
@@ -272,6 +292,7 @@
   const EARLY_SCREENSHOT_RELEASE_DELAY = 250;
   const BACKGROUND_LOOKUP_DEPTH = 5;
   const DEVTOOLS_RESUME_COOLDOWN = 1200;
+  const DEVTOOLS_VISIBLE_BLUR_COOLDOWN = 350;
   const MEDIA_URL_RE = /\.(?:apng|avif|bmp|gif|ico|jpe?g|png|svg|webp|mp4|webm|mov|m4v)(?:[?#].*)?$/i;
   const PRINT_MEDIA_SELECTOR = O.inlineBackgroundBlock ? `${MEDIA_SELECTOR},${INLINE_BACKGROUND_SELECTOR}` : MEDIA_SELECTOR;
   const IMG_CSS = [
@@ -293,6 +314,10 @@
   let consoleBaitHits = 0;
   let lastEventLoopTick = performance.now();
   let devtoolsChecksPausedUntil = startedAt + O.startupGrace;
+  let sizeCheckFrame = 0;
+  let sizeCheckTimer = 0;
+  let activityBurstTimer = 0;
+  let activityBurstUntil = 0;
   let blurOverlay = null;
   let blurShownAt = 0;
   let blurHideTimer = 0;
@@ -307,6 +332,12 @@
   const areDevtoolsChecksPaused = () => performance.now() < devtoolsChecksPausedUntil;
   const canRunDevtoolsChecks = () => isAfterGracePeriod() && !isHidden() && !areDevtoolsChecksPaused();
   const normalizeUrl = (url) => /^https?:\/\//i.test(url) ? url : `https://${url}`;
+  const nextFrame = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame.bind(window)
+    : (fn) => setTimeout(fn, 16);
+  const cancelFrame = typeof cancelAnimationFrame === 'function'
+    ? cancelAnimationFrame.bind(window)
+    : clearTimeout;
 
   const onReady = (fn) => {
     if (document.readyState === 'loading') {
@@ -525,7 +556,9 @@
   const installDevtoolsLifecycleGuard = () => {
     if (!O.devtools) return;
 
-    window.addEventListener('blur', () => pauseDevtoolsChecks(), true);
+    window.addEventListener('blur', () => {
+      pauseDevtoolsChecks(document.hidden ? DEVTOOLS_RESUME_COOLDOWN : DEVTOOLS_VISIBLE_BLUR_COOLDOWN);
+    }, true);
     window.addEventListener('focus', () => pauseDevtoolsChecks(), true);
     window.addEventListener('pageshow', () => pauseDevtoolsChecks(), true);
     window.addEventListener('pagehide', () => pauseDevtoolsChecks(), true);
@@ -1139,7 +1172,7 @@
     }
   };
 
-  const checkSize = () => {
+  const checkSize = (reason = 'size-check') => {
     if (skipDevtoolsCheck()) return;
 
     const widthGap = Math.abs(window.outerWidth - window.innerWidth);
@@ -1149,7 +1182,7 @@
     sizeHits = suspicious ? sizeHits + 1 : 0;
 
     if (sizeHits >= O.sizeHits) {
-      detected('size-check', {
+      detected(reason, {
         outerWidth: window.outerWidth,
         innerWidth: window.innerWidth,
         outerHeight: window.outerHeight,
@@ -1158,6 +1191,22 @@
         heightGap
       });
     }
+  };
+
+  const queueSizeCheck = (reason = 'instant-size-check') => {
+    if (!O.devtools || !O.sizeCheck || !O.instantSizeCheck) return;
+
+    if (sizeCheckFrame) cancelFrame(sizeCheckFrame);
+
+    sizeCheckFrame = nextFrame(() => {
+      sizeCheckFrame = 0;
+      checkSize(reason);
+    });
+
+    clearTimeout(sizeCheckTimer);
+    sizeCheckTimer = setTimeout(() => {
+      checkSize(`${reason}-settled`);
+    }, 80);
   };
 
   const installSizeCheck = () => {
@@ -1260,12 +1309,81 @@
     }, O.debuggerInterval);
   };
 
+  const stopActivityBurst = () => {
+    clearTimeout(activityBurstTimer);
+    activityBurstTimer = 0;
+    activityBurstUntil = 0;
+  };
+
+  const runActivityBurstTick = (reason) => {
+    if (!O.devtools || !O.activityBurstCheck || handled) {
+      stopActivityBurst();
+      return;
+    }
+
+    if (performance.now() > activityBurstUntil) {
+      stopActivityBurst();
+      return;
+    }
+
+    checkSize(reason);
+    runDebuggerCheck();
+
+    activityBurstTimer = setTimeout(() => {
+      runActivityBurstTick(reason);
+    }, O.activityBurstInterval);
+  };
+
+  const startActivityBurst = (reason = 'activity-burst-check') => {
+    if (!O.devtools || !O.activityBurstCheck || handled) return;
+
+    activityBurstUntil = Math.max(activityBurstUntil, performance.now() + O.activityBurstDuration);
+
+    if (activityBurstTimer) return;
+
+    runActivityBurstTick(reason);
+  };
+
+  const installDevtoolsInstantChecks = () => {
+    if (!O.devtools) return;
+
+    if (O.instantSizeCheck) {
+      window.addEventListener('resize', () => {
+        queueSizeCheck('instant-resize-size-check');
+        startActivityBurst('resize-burst-check');
+      }, true);
+
+      window.addEventListener('orientationchange', () => {
+        queueSizeCheck('instant-orientation-size-check');
+        startActivityBurst('orientation-burst-check');
+      }, true);
+
+      setTimeout(() => {
+        queueSizeCheck('startup-size-check');
+      }, O.startupGrace + 30);
+    }
+
+    if (!O.activityBurstCheck) return;
+
+    ['pointerdown', 'mousedown', 'wheel', 'scroll'].forEach((eventName) => {
+      document.addEventListener(eventName, () => {
+        startActivityBurst(`${eventName}-burst-check`);
+      }, { capture: true, passive: true });
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (isBlockedShortcut(event)) return;
+      startActivityBurst('keydown-burst-check');
+    }, true);
+  };
+
   onReady(() => {
     injectImgCss();
     protectMediaAttrs();
     installMediaBlockers();
     installMutationObserver();
     installDevtoolsLifecycleGuard();
+    installDevtoolsInstantChecks();
     installPrivacyBlur();
     installScreenshotAndSaveProtection();
     installPrintProtection();
